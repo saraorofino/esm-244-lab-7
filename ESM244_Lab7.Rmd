@@ -154,7 +154,69 @@ tmap_save(sst_map, "sara_hawaii.png", height = 5)
 ```
 
 
+Conditional Rasters and Masking:
 
+Let's say: we have a sensitive species and we're trying to find habitat that it might like. We know: they likee warm water (average SST >= 25.6 degerees) and solar (PAR) below 54.
+
+```{r}
+
+# Check extent of raster layers in the console - they need to line up but they don't....
+
+# First make the extent the same: 
+extent(hi_sst_84) <- extent(hi_par_84)
+
+# Give rasters the same number of rows and columns:
+# Make a raster that matches the par raster (copy and paste from hi_par_84)
+cr <- raster(nrow = 822, 
+             ncol = 1229, 
+             xmn = -160.4365, 
+             xmx = -154.5373, 
+             ymn = 18.7309, 
+             ymx = 22.44634)
+
+# Resample the sst to match that raster you created 
+sst_new <- resample(hi_sst_84, cr, method = "bilinear")
+
+
+# Can use compareRaster() to compare the rasters and see if they match 
+compareRaster(sst_new, hi_par_84)
+
+plot(sst_new)
+plot(hi_par_84)
+
+# Make a cropped version just for Kauai
+bounds_main <- as(extent(-159.9, -159.2, 21.7, 22.3), 'SpatialPolygons')
+
+crs(bounds_main) <- crs(sst_new)
+
+par_kauai <- crop(hi_par_84, bounds_main)
+sst_kauai <- crop(sst_new, bounds_main)
+
+plot(par_kauai)
+plot(sst_kauai)
+```
+
+
+Now we only want to isolate regions wheere the temp >= 25.4, PAR < 54
+```{r}
+# Make a copy just in case and use that 
+par_hab <- par_kauai
+
+# Set values that above 54 to NA values 
+par_hab[par_hab>=54] <- NA
+plot(par_hab) # Notice only areas where par is < 54 show up when you plot 
+
+# Copy
+sst_hab <- sst_kauai
+
+# Keep only temps >= 25.4
+sst_hab[sst_hab<25.4] <- NA
+plot(sst_hab)
+
+# Where do these overlap? raster::mask
+suit_hab <- mask(sst_hab, par_hab)
+plot(suit_hab)
+```
 
 
 
