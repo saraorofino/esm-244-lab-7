@@ -21,12 +21,13 @@ library(maptools)
 library(sp)
 library(raster)
 library(gstat)
+library(RColorBrewer)
 
 
 ```
 
 
-Part 1. Hawaii raster practice 
+###Part 1. Hawaii raster practice 
 
 ```{r}
 
@@ -218,5 +219,240 @@ suit_hab <- mask(sst_hab, par_hab)
 plot(suit_hab)
 ```
 
+###Part 2. Point Pattern Analysis 
 
+An analysis of red tree voles in Humboldt County 
+
+```{r}
+
+voles <- read_sf(dsn = "redtreevoledata", layer = "ds033") %>% 
+  dplyr::select(COUNTY) %>% 
+  filter(COUNTY == "HUM") %>% 
+  st_transform(crs = 4326)
+
+plot(voles)
+
+# Get Humboldt County outline
+humboldt <- read_sf(dsn = "redtreevoledata", layer = "california_county_shape_file") %>% 
+  filter(NAME == "Humboldt") %>% 
+  dplyr::select(NAME)
+st_crs(humboldt) <- 4326
+
+tm_shape(humboldt) +
+  tm_fill() +
+  tm_shape(voles) +
+  tm_dots(size = 0.2)
+
+ggplot() +
+  geom_sf(data = humboldt) +
+  geom_sf(data = voles)
+
+# Save ggplots:
+
+ggsave("humvoles.png",
+       units = "in",
+       width = 4,
+       height = 6,
+       dpi = 300)
+```
+
+
+We want to explore point patterns a few different ways:  
+  
+- quadrat analysis   
+- distance based (neighbor analysis, G-function and K-function)  
+
+```{r}
+
+# Convert from an sf object to just a spatial object (class sp) and then to ppp for point pattern analysis
+
+voles_sp <- as(voles, "Spatial")
+voles_ppp <- as(voles_sp, "ppp")
+
+# Need to create a window for point pattern - do this with the county outline because that is our outer window limit 
+
+humboldt_sp <- as(humboldt, "Spatial")
+humboldt_win <- as(humboldt_sp, "owin")
+
+# Combine these together to create a point pattern - requires points and bounding window 
+voles_pb <- ppp(voles_ppp$x, voles_ppp$y, window = humboldt_win)
+
+
+```
+
+Note: Null hypothesis with point pattren analysis is evenness not complete spatial randomness
+
+Quadrat test:
+```{r}
+vole_qt <- quadrat.test(voles_pb, nx = 5, ny = 10)
+
+# Remember testing the null hypothesis of spatial evenness (although you'll har it called a test for CSR)
+vole_qt
+
+# p-value < 0.001 --> reject null hypothesis of spatial evenness
+# We would conclude that these events do not reflect spatial evenness 
+
+plot(voles_pb)
+plot(vole_qt, add=TRUE, cex = 0.4)
+```
+
+Plotting kernal densities for spatial data:
+
+```{r}
+
+#sigma - bandwidth for density (be CAREFUL! Specifying different bandwidths can totally change the plot)
+
+point_density <- density(voles_pb, sigma = 0.02)
+plot(point_density)
+
+# Convert to raster -  be careful with this and think through this decision before; especially does the bandwidth make sense? Is it reasonable? Logical basis for this decision?
+
+vole_raster <- raster(point_density, crs=wgs84)
+
+tm_shape(vole_raster) +
+  tm_raster()
+```
+
+Nearest neighbor    
+  
+G-function: considers the distance of each observation to its NEAREST neighbor     
+
+K-function: considers how close all neighboring observations are to an event (concentric circles)  
+
+```{r}
+
+# Create a sequence of distances over which we will calculate nearest neighbor distances 
+r = seq(0,0.15, by = 0.005)
+
+gfunction <- envelope(voles_pb, fun = Gest, r = r, nsim = 20)
+
+# plot gfunction curve for our observations and then add a line for the theoretical CSR outcomes (in red)
+plot(gfunction$obs ~ gfunction$r, type  = "l", col = "black")
+lines(gfunction$theo ~ gfunction$r, type = "l", col = "red")
+
+# Our observations are plotted over indicating clusters, which makes sense with the quadrats we plotted earlier 
+
+
+# K/l function (more comprehensive): Asking about how close ALL neighbors aree to EVERY event in the spatial window 
+
+r2 <- seq(0, 0.5, by = 0.05)
+
+lfunction <- envelope(voles_pb, fun = Lest, r = r2, nsim = 20, global = TRUE) #Global makes it apply to entire study window
+
+# Plot together:
+plot(lfunction$obs ~ lfunction$r, type = "l", col = "blue")
+lines(lfunction$theo ~ lfunction$r, type = "l", col = "red")
+```
+
+Diggle-Cressie-Loosmore-Ford test of CSR:
+```{r}
+
+DCLFtest <- dclf.test(voles_pb, nsim = 20)
+DCLFtest
+
+#Statistical test for spatial randomness --> p-value 0.0472 --> significant (not CSR)
+# If you have a really large sample size you're more likely to find something different than CSR even if it isn't meaningful just because you have a lot of observations
+```
+
+###Part 3. Spatial interpolation by kriging 
+
+```{r}
+
+ks_rain <- read_csv("KSRain2.csv") 
+
+# There is lat/long but not stored specifically as spatial data - R doesn't recognize this as spatial information
+# Transform to spatial data using st_as_sf
+
+ks_sf <- st_as_sf(ks_rain, coords = c("LON","LAT"), crs = 4326)
+plot(ks_sf)
+
+# Read in county data and add projection:
+ks_counties <- read_sf(dsn = "KSCounties", layer = "ks_counties_shapefile")
+
+st_crs(ks_counties) <- 4326
+
+plot(ks_counties)
+
+tm_shape(ks_counties) +
+  tm_fill() +
+  tm_shape(ks_sf) +
+  tm_dots("AMT", size = 0.5)
+```
+
+
+```{r}
+
+# Transform to spatial information 
+ks_sp <- as_Spatial(ks_sf)
+
+
+```
+
+Make a spatial grid to interpolate values over:  
+
+```{r}
+
+# Grid that includes lat/long bounds for Kansas
+
+lat <- seq(37,40, length.out = 200)
+long <- seq(-94.6, -102, length.out = 200)
+
+# Take two vectors and turn them into a grid 
+grid <- expand.grid(lon = long, lat = lat)
+
+# Convert to sf object with coordinates
+grid_sf <- st_as_sf(grid, coords = c("lon", "lat"), crs = 4326)
+
+# Need to convert back to spatial stats dataframe to work with the spatstat package
+grid_sp <- as_Spatial(grid_sf)
+```
+
+Then make a variogram and find the variogram model:  
+```{r}
+# Remember the ~1 tells R what type of kriging we're doing (1 is for ordinary)
+
+ks_vgm <- variogram(AMT ~ 1, ks_sp)
+
+plot(ks_vgm)
+
+# Variogram fit - need to give it reasonable parameters for nugget psill and range; also specify model type 
+ks_vgm_fit <- fit.variogram(ks_vgm, model = vgm(nugget = 0.2, psill = 0.8, range = 200, model = "Sph"))
+
+# Plot together 
+plot(ks_vgm, ks_vgm_fit)
+```
+
+Now that we have the variogram and the fit we can do spatial interpolation:  
+
+```{r}
+# Need to give it the original data, the grid for interpolation, and the model variogram for weighting predictions
+
+ks_krige <- krige(AMT ~1, ks_sp, grid_sp, ks_vgm_fit)
+
+# Make into a dataframe that is easiser to use and look at:
+
+ks_krige_df <- as.data.frame(ks_krige)
+
+# Rename columns because headings are difficult 
+ks_krige_2 <- ks_krige_df %>% 
+  rename(lon = coords.x1, lat = coords.x2, predicted = var1.pred, err = var1.var)
+
+# Need to convert into spatial data (sf) and name crs
+
+rain_predicted <- st_as_sf(ks_krige_2, coords = c("lon", "lat"), crs = 4326)
+
+# Get an outline of kansas and crop to that outline - because the grid we specified for our predictions is just a rectangle... 
+
+ks <- read_sf(dsn = "states", layer = "cb_2017_us_state_20m") %>% 
+  dplyr::select(NAME) %>% 
+  filter(NAME == "Kansas") %>% 
+  st_transform(crs = 4326)
+
+rain_cropped <- st_intersection(rain_predicted, ks)
+
+# Now we can see the predicted rainfall with the cropped state of kansas 
+plot(rain_cropped)
+
+# See the key for how to plot in tmap with the counties overlaid 
+```
 
